@@ -1,0 +1,5 @@
+play.ipynb
+
+models/
+.venv/
+.DS_Store
