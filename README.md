@@ -19,5 +19,10 @@ https://huggingface.co/meta-llama/Llama-2-7b/
 python3 convert-pth-to-ggml.py <model_dir>
 ```
 
+2. Quantize the model.
+
+```cpp
+./llama-quantize models/7B/ggml-model-f16.bin models/7B/ggml-model-quant.bin dtype
+```
 
 

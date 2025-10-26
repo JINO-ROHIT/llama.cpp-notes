@@ -1,3 +1,5 @@
+#pragma once
+
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -20,12 +22,6 @@ struct ggml_context;
 enum ggml_type {
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1,
-    GGML_TYPE_I8,
-    GGML_TYPE_I16,
-    GGML_TYPE_I32,
-    GGML_TYPE_F16,
-    GGML_TYPE_F32,
-    GGML_TYPE_COUNT,
 };
 
 enum ggml_op {
@@ -81,4 +77,4 @@ struct ggml_cgraph{
     struct ggml_tensor * nodes[GGML_MAX_NODES];
     struct ggml_tensor * grads[GGML_MAX_NODES];
     struct ggml_tensor * leafs[GGML_MAX_NODES];
-}
+};
