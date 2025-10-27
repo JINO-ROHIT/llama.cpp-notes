@@ -23,7 +23,7 @@ bool llama_model_quantize(const std::string &input_path,
                         const std::string &output_path,
                         int dtype)
 {
-    ggml_type type = GGML_TYPE_Q4_1;
+    ggml_type type = GGML_TYPE_Q4_0; //TYPE_Q4_1 not implemented yet
 
     gpt_vocab vocab;
 
