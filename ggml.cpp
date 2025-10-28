@@ -259,7 +259,7 @@ struct ggml_tensor* ggml_new_tensor_impl(
             return NULL;
         }
 
-        data = ctx->scratch.data + ctx->scratch.offs;
+        data = (char* const) ctx->scratch.data + ctx->scratch.offs;
 
         *obj_new = (struct ggml_object) {
             .offs = cur_end + GGML_OBJECT_SIZE,
@@ -340,4 +340,26 @@ struct ggml_tensor * ggml_new_tensor_2d(
         int    ne1) {
     const int ne[2] = { ne0, ne1 };
     return ggml_new_tensor(ctx, type, 2, ne);
+}
+
+
+
+int ggml_nelements(const struct ggml_tensor * tensor) {
+    static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
+
+    return tensor->ne[0]*tensor->ne[1]*tensor->ne[2]*tensor->ne[3];
+}
+
+size_t ggml_nbytes(const struct ggml_tensor * tensor) {
+    static_assert(GGML_MAX_DIMS == 4, "GGML_MAX_DIMS is not 4 - update this function");
+
+    return (ggml_nelements(tensor)*GGML_TYPE_SIZE[tensor->type])/GGML_BLCK_SIZE[tensor->type];
+}
+
+int ggml_blck_size(enum ggml_type type) {
+    return GGML_BLCK_SIZE[type];
+}
+
+size_t ggml_type_size(enum ggml_type type) {
+    return GGML_TYPE_SIZE[type];
 }

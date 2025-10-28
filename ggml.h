@@ -93,7 +93,7 @@ struct ggml_cgraph{
 struct ggml_scratch {
     size_t offs; // offset in scratch buffer
     size_t size; // size of scratch buffer
-    void * data; // pointer to scratch buffer data
+    void* data; // pointer to scratch buffer data
 };
 
 struct ggml_init_params {
@@ -112,3 +112,7 @@ struct ggml_tensor * ggml_new_tensor_2d(struct ggml_context* ctx, enum ggml_type
 
 
 float ggml_type_sizef(enum ggml_type type);
+int ggml_nelements(const struct ggml_tensor * tensor);
+size_t ggml_nbytes(const struct ggml_tensor * tensor);
+int ggml_blck_size(enum ggml_type type);
+size_t ggml_type_size(enum ggml_type type);
