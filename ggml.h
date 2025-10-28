@@ -22,6 +22,12 @@ struct ggml_context;
 enum ggml_type {
     GGML_TYPE_Q4_0,
     GGML_TYPE_Q4_1,
+    GGML_TYPE_I8,
+    GGML_TYPE_I16,
+    GGML_TYPE_I32,
+    GGML_TYPE_F16,
+    GGML_TYPE_F32,
+    GGML_TYPE_COUNT,
 };
 
 enum ggml_op {
@@ -49,24 +55,28 @@ enum ggml_op {
     GGML_OP_MUL_MAT,
 };
 
-struct ggml_tensor{
-    enum ggml_type type; // usually i think we use q4_0 and q4_1
+struct ggml_tensor {
+    enum ggml_type type; // dtype (e.g., Q4_0, F32)
+    int n_dims;          // number of dimensions (1 to 4)
+    int ne[GGML_MAX_DIMS]; // number of elements per dimension
+    size_t nb[GGML_MAX_DIMS]; // strides in bytes (memory layout)
+    enum ggml_op op;     // Operation associated with this tensor
+    bool is_param;       // Is this tensor a model parameter?
+    struct ggml_tensor *grad; //gradient tensor
+    struct ggml_tensor *src0; // input tensor for operation
+    struct ggml_tensor *src1; // input tensor for operation
+    struct ggml_tensor * opt[GGML_MAX_OPT]; // optional tensors for operation
 
-    int n_dims;
-    int ne[GGML_MAX_DIMS]; // 4
-    size_t nb[GGML_MAX_DIMS]; // strides in bytes
+    // thread scheduling
+    int n_tasks;
 
-    enum ggml_op op;
+    // performance
+    int     perf_runs;
+    int64_t perf_cycles;
+    int64_t perf_time_us;
 
-    bool is_param;
-
-    struct ggml_tensor *grad;
-    struct ggml_tensor *src0;
-    struct ggml_tensor *src1;
-
-    void *data;
-    char padding[8];
-
+    void *data;          // pointer to the tensor's data
+    char padding[8];     // padding for memory alignment
 };
 
 struct ggml_cgraph{
@@ -78,3 +88,27 @@ struct ggml_cgraph{
     struct ggml_tensor * grads[GGML_MAX_NODES];
     struct ggml_tensor * leafs[GGML_MAX_NODES];
 };
+
+//A temporary memory buffer for intermediate computations, reducing memory allocation overhead.
+struct ggml_scratch {
+    size_t offs; // offset in scratch buffer
+    size_t size; // size of scratch buffer
+    void * data; // pointer to scratch buffer data
+};
+
+struct ggml_init_params {
+    // memory pool
+    size_t mem_size;   // bytes
+    void * mem_buffer; // if NULL, memory will be allocated internally
+};
+
+struct ggml_context* ggml_init(struct ggml_init_params params);
+struct ggml_tensor * ggml_new_tensor_1d(struct ggml_context* ctx, enum ggml_type type, int ne0);
+struct ggml_tensor * ggml_new_tensor_2d(struct ggml_context* ctx, enum ggml_type type, int ne0, int ne1);
+
+
+
+
+
+
+float ggml_type_sizef(enum ggml_type type);
