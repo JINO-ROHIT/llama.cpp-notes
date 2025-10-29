@@ -52,12 +52,22 @@ enum ggml_op {
     GGML_OP_SILU,
     GGML_OP_NORM, // normalize
 
+    GGML_OP_VIEW,
+    GGML_OP_CPY,
+    GGML_OP_PERMUTE,
+    GGML_OP_ROPE,
+    GGML_OP_SCALE,
+    GGML_OP_GET_ROWS,
+    GGML_OP_RESHAPE,
+    GGML_OP_DIAG_MASK_INF,
+    GGML_OP_SOFT_MAX,
+
     GGML_OP_MUL_MAT,
 };
 
 struct ggml_tensor {
     enum ggml_type type; // dtype (e.g., Q4_0, F32)
-    int n_dims;          // number of dimensions (1 to 4)
+    int n_dims;  // number of dimensions (1 to 4)
     int ne[GGML_MAX_DIMS]; // number of elements per dimension
     size_t nb[GGML_MAX_DIMS]; // strides in bytes (memory layout)
     enum ggml_op op;     // Operation associated with this tensor
@@ -75,7 +85,7 @@ struct ggml_tensor {
     int64_t perf_cycles;
     int64_t perf_time_us;
 
-    void *data;          // pointer to the tensor's data
+    void *data;  // pointer to the tensor's data
     char padding[8];     // padding for memory alignment
 };
 
@@ -105,14 +115,33 @@ struct ggml_init_params {
 struct ggml_context* ggml_init(struct ggml_init_params params);
 struct ggml_tensor * ggml_new_tensor_1d(struct ggml_context* ctx, enum ggml_type type, int ne0);
 struct ggml_tensor * ggml_new_tensor_2d(struct ggml_context* ctx, enum ggml_type type, int ne0, int ne1);
+void * ggml_get_data(const struct ggml_tensor* tensor);
+size_t ggml_used_mem(const struct ggml_context* ctx);
+void ggml_free(struct ggml_context * ctx);
 
-
-
-
-
-
+//////for operations
+struct ggml_tensor* ggml_view_tensor(struct ggml_context* ctx, const struct ggml_tensor* src);
+struct ggml_tensor* ggml_dup_tensor(struct ggml_context* ctx, const struct ggml_tensor* src);
+struct ggml_tensor * ggml_cpy(struct ggml_context* ctx,struct ggml_tensor* a,struct ggml_tensor* b);
+struct ggml_tensor* ggml_repeat(struct ggml_context* ctx,struct ggml_tensor* a,struct ggml_tensor* b);
+struct ggml_tensor* ggml_norm(struct ggml_context* ctx, struct ggml_tensor* a);
+struct ggml_tensor* ggml_mul(struct ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b);
+struct ggml_tensor* ggml_mul_mat(struct ggml_context* ctx,struct ggml_tensor* a,struct ggml_tensor* b);
+struct ggml_tensor* ggml_view_1d(struct ggml_context* ctx,struct ggml_tensor* a,int ne0,size_t offset);
+struct ggml_tensor* ggml_permute(struct ggml_context* ctx,struct ggml_tensor* a,int axis0,int axis1,int axis2,int axis3);
+struct ggml_tensor* ggml_rope(struct ggml_context * ctx,struct ggml_tensor  * a,int   n_past,int   n_dims,int   mode);
+struct ggml_tensor* ggml_new_tensor_3d(struct ggml_context * ctx,enum   ggml_type type,int    ne0,int    ne1,int    ne2);
+struct ggml_tensor * ggml_reshape_3d(struct ggml_context* ctx,struct ggml_tensor* a,int ne0,int ne1,int ne2);
+struct ggml_tensor * ggml_scale(struct ggml_context * ctx,struct ggml_tensor * a,struct ggml_tensor * b);
 float ggml_type_sizef(enum ggml_type type);
 int ggml_nelements(const struct ggml_tensor * tensor);
 size_t ggml_nbytes(const struct ggml_tensor * tensor);
 int ggml_blck_size(enum ggml_type type);
 size_t ggml_type_size(enum ggml_type type);
+size_t ggml_element_size(const struct ggml_tensor * tensor);
+struct ggml_tensor* ggml_get_rows(struct ggml_context* ctx,struct ggml_tensor* a,struct ggml_tensor* b);
+struct ggml_tensor* ggml_new_f32(struct ggml_context * ctx, float value);
+struct ggml_tensor * ggml_diag_mask_inf(struct ggml_context * ctx,struct ggml_tensor  * a,int n_past);
+struct ggml_tensor * ggml_soft_max(struct ggml_context* ctx, struct ggml_tensor* a);
+struct ggml_tensor * ggml_add(struct ggml_context * ctx,struct ggml_tensor * a,struct ggml_tensor * b);
+struct ggml_tensor * ggml_silu(struct ggml_context * ctx,struct ggml_tensor  * a);
