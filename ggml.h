@@ -145,3 +145,8 @@ struct ggml_tensor * ggml_diag_mask_inf(struct ggml_context * ctx,struct ggml_te
 struct ggml_tensor * ggml_soft_max(struct ggml_context* ctx, struct ggml_tensor* a);
 struct ggml_tensor * ggml_add(struct ggml_context * ctx,struct ggml_tensor * a,struct ggml_tensor * b);
 struct ggml_tensor * ggml_silu(struct ggml_context * ctx,struct ggml_tensor  * a);
+
+
+//for the computation graph
+void ggml_build_forward_expand(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor);
+struct ggml_cgraph ggml_build_forward (struct ggml_tensor * tensor);

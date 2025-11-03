@@ -33,6 +33,8 @@ inline static void ggml_vec_set_i32(const int n, int32_t * x, const int32_t v) {
 inline static void ggml_vec_set_f16(const int n, ggml_fp16_t * x, const int32_t v) { for (int i = 0; i < n; ++i) x[i] = v; }
 inline static void ggml_vec_set_f32 (const int n, float * x, const float   v)                  { for (int i = 0; i < n; ++i) x[i]  = v;           }
 
+inline static void ggml_vec_add_f32 (const int n, float * z, const float * x, const float * y) { for (int i = 0; i < n; ++i) z[i]  = x[i] + y[i]; }
+
 static const ggml_float GELU_COEF_A    = 0.044715;
 static const ggml_float SQRT_2_OVER_PI = 0.79788456080286535587989211986876;
 inline static float ggml_gelu_f32(float x) {
@@ -255,6 +257,23 @@ struct ggml_context {
 struct ggml_context_container {
     bool used;
     struct ggml_context context;
+};
+
+//// compute types
+enum ggml_task_type {
+    GGML_TASK_INIT = 0,
+    GGML_TASK_COMPUTE,
+    GGML_TASK_FINALIZE,
+};
+
+struct ggml_compute_params {
+    enum ggml_task_type type;
+
+    int ith, nth;
+
+    // work buffer for all threads
+    size_t wsize;
+    void * wdata;
 };
 
 //global state holding up to GGML_MAX_CONTEXTS contexts.
@@ -1100,7 +1119,7 @@ struct ggml_tensor* ggml_repeat(
 }
 
 
-struct ggml_tensor * ggml_rope(
+struct ggml_tensor* ggml_rope(
         struct ggml_context * ctx,
         struct ggml_tensor  * a,
         int                   n_past,
@@ -1111,9 +1130,9 @@ struct ggml_tensor * ggml_rope(
     if (a->grad) {
         is_node = true;
     }
-    struct ggml_tensor * result = ggml_view_tensor(ctx, a);
+    struct ggml_tensor* result = ggml_view_tensor(ctx, a);
 
-    struct ggml_tensor * b = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 3);
+    struct ggml_tensor* b = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 3);
     ((int32_t *) b->data)[0] = n_past;
     ((int32_t *) b->data)[1] = n_dims;
     ((int32_t *) b->data)[2] = mode;
@@ -1123,5 +1142,221 @@ struct ggml_tensor * ggml_rope(
     result->src0 = a;
     result->src1 = b;
 
+    return result;
+}
+
+
+
+
+///ggml computation graph and forward pass
+
+static void ggml_compute_forward_add_f32(
+        const struct ggml_compute_params * params,
+        const struct ggml_tensor * src0,
+        const struct ggml_tensor * src1,
+        struct ggml_tensor * dst) {
+
+    if (params->type == GGML_TASK_INIT || params->type == GGML_TASK_FINALIZE) {
+        return;
+    }
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int n  = ggml_nrows(src0);
+    const int nc = src0->ne[0];
+
+    const size_t nb00 = src0->nb[0];
+    const size_t nb01 = src0->nb[1];
+
+    const size_t nb10 = src1->nb[0];
+    const size_t nb11 = src1->nb[1];
+
+    const size_t nb0 = dst->nb[0];
+    const size_t nb1 = dst->nb[1];
+
+    if (nb10 == sizeof(float)) {
+        const int j0 = (n/nth)*ith;
+        const int j1 = ith == nth - 1 ? n : (n/nth)*(ith + 1);
+
+        for (int j = j0; j < j1; j++) {
+            ggml_vec_add_f32(nc,
+                    (float *) ((char *) dst->data  + j*nb1),
+                    (float *) ((char *) src0->data + j*nb01),
+                    (float *) ((char *) src1->data + j*nb11));
+        }
+    } else {
+        // src1 is not contiguous
+        for (int j = ith; j < n; j += nth) {
+            float * dst_ptr  = (float *) ((char *) dst->data  + j*nb1);
+            float * src0_ptr = (float *) ((char *) src0->data + j*nb01);
+            for (int i = 0; i < nc; i++) {
+                float * src1_ptr = (float *) ((char *) src1->data + j*nb11 + i*nb10);
+
+                dst_ptr[i] = src0_ptr[i] + *src1_ptr;
+            }
+        }
+    }
+}
+
+static void ggml_compute_forward_add(
+        const struct ggml_compute_params* params,
+        const struct ggml_tensor* src0,
+        const struct ggml_tensor* src1,
+        struct ggml_tensor* dst) 
+{
+    ggml_compute_forward_add_f32(params, src0, src1, dst);
+} 
+
+
+static void ggml_compute_forward(struct ggml_compute_params* params, struct ggml_tensor* tensor) {
+    switch (tensor->op) {
+        case GGML_OP_NONE:
+            {
+                // do nothing
+            } break;
+        case GGML_OP_ADD:
+            {
+                ggml_compute_forward_add(params, tensor);
+            } break;
+        case GGML_OP_MUL:
+            {
+                ggml_compute_forward_mul(params, tensor);
+            } break;
+        case GGML_OP_MUL_MAT:
+            {
+                ggml_compute_forward_mul_mat(params, tensor);
+            } break;
+        case GGML_OP_SCALE:
+            {
+                ggml_compute_forward_scale(params, tensor);
+            } break;
+        case GGML_OP_CPY:
+            {
+                ggml_compute_forward_cpy(params, tensor);
+            } break;
+        case GGML_OP_PERMUTE:
+            {
+                ggml_compute_forward_permute(params, tensor);
+            } break;
+        case GGML_OP_RESHAPE:
+            {
+                // do nothing
+            } break;
+        case GGML_OP_NORM:
+            {
+                ggml_compute_forward_norm(params, tensor);
+            } break;
+        case GGML_OP_SILU:
+            {
+                ggml_compute_forward_silu(params, tensor);
+            } break;
+        case GGML_OP_DIAG_MASK_INF:
+            {
+                ggml_compute_forward_diag_mask_inf(params, tensor);
+            } break;
+        case GGML_OP_SOFT_MAX:
+            {
+                ggml_compute_forward_soft_max(params, tensor);
+            } break;
+        case GGML_OP_ROPE:
+            {
+                ggml_compute_forward_rope(params, tensor);
+            } break;
+        case GGML_OP_REPEAT:
+            {
+                ggml_compute_forward_repeat(params, tensor);
+            } break;
+    }
+}
+
+
+static void ggml_visit_parents(struct ggml_cgraph* cgraph, struct ggml_tensor* node) {
+    if (node->grad == NULL) {
+        // this usually happens when we generate intermediate nodes from constants in the backward pass
+        // it can also happen during forward pass, if the user performs computations with constants
+        if (node->op != GGML_OP_NONE) {
+            //GGML_PRINT_DEBUG("%s: warning: node %p has no grad, but op %d\n", __func__, (void *) node, node->op);
+        }
+    }
+
+    // check if already visited
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        if (cgraph->nodes[i] == node) {
+            return;
+        }
+    }
+
+    for (int i = 0; i < cgraph->n_leafs; i++) {
+        if (cgraph->leafs[i] == node) {
+            return;
+        }
+    }
+
+    if (node->src0) {
+        ggml_visit_parents(cgraph, node->src0);
+    }
+
+    if (node->src1) {
+        ggml_visit_parents(cgraph, node->src1);
+    }
+
+    for (int i = 0; i < GGML_MAX_OPT; ++i) {
+        if (node->opt[i]) {
+            ggml_visit_parents(cgraph, node->opt[i]);
+        }
+    }
+
+    if (node->op == GGML_OP_NONE && node->grad == NULL) {
+        // reached a leaf node, not part of the gradient graph (e.g. a constant)
+        cgraph->leafs[cgraph->n_leafs] = node;
+        cgraph->n_leafs++;
+    } else {
+
+        cgraph->nodes[cgraph->n_nodes] = node;
+        cgraph->grads[cgraph->n_nodes] = node->grad;
+        cgraph->n_nodes++;
+    }
+}
+
+static void ggml_build_forward_impl(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor, bool expand) {
+    if (!expand) {
+        cgraph->n_nodes = 0;
+        cgraph->n_leafs = 0;
+    }
+
+    const int n0 = cgraph->n_nodes;
+    UNUSED(n0);
+
+    ggml_visit_parents(cgraph, tensor);
+
+    const int n_new = cgraph->n_nodes - n0;
+    printf("%s: visited %d new nodes\n", __func__, n_new);
+
+    if (n_new > 0) {
+        // the last added node should always be starting point
+    }
+}
+
+void ggml_build_forward_expand(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor) {
+    ggml_build_forward_impl(cgraph, tensor, true);
+}
+
+struct ggml_cgraph ggml_build_forward(struct ggml_tensor* tensor) {
+    struct ggml_cgraph result = {
+        /*.n_nodes      =*/ 0,
+        /*.n_leafs      =*/ 0,
+        /*.n_threads    =*/ 0,
+        /*.work_size    =*/ 0,
+        /*.work         =*/ NULL,
+        /*.nodes        =*/ { NULL },
+        /*.grads        =*/ { NULL },
+        /*.leafs        =*/ { NULL },
+        /*.perf_runs    =*/ 0,
+        /*.perf_cycles  =*/ 0,
+        /*.perf_time_us =*/ 0,
+    };
+
+    ggml_build_forward_impl(&result, tensor, false);
     return result;
 }
