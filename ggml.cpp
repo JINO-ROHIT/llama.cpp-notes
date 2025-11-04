@@ -11,6 +11,7 @@ typedef float ggml_float;
 #define GGML_MEM_ALIGN 16
 #define CACHE_LINE_SIZE 64
 #define FLT_MAX __FLT_MAX__
+// #define GGML_SIMD add the simd flag for better ops
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
