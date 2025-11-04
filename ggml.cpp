@@ -1405,3 +1405,70 @@ struct ggml_cgraph ggml_build_forward(struct ggml_tensor* tensor) {
     ggml_build_forward_impl(&result, tensor, false);
     return result;
 }
+
+struct ggml_compute_state_shared {
+    ggml_lock_t spin;        // Spinlock for synchronization
+    int n_threads;           // Total number of threads
+    
+    // Synchronization primitives
+    atomic_int  n_ready;     // # threads are ready
+    atomic_bool has_work;    //  work to do?
+    atomic_bool stop;        // threads stop?
+};
+
+struct ggml_compute_state {
+    ggml_thread_t thrd;
+
+    struct ggml_compute_params params;
+    struct ggml_tensor * node;
+
+    struct ggml_compute_state_shared * shared;
+};
+
+static thread_ret_t ggml_graph_compute_thread(void * data) {
+    struct ggml_compute_state * state = (struct ggml_compute_state *) data;
+
+    const int n_threads = state->shared->n_threads;
+
+    while (true) {
+        if (atomic_fetch_add(&state->shared->n_ready, 1) == n_threads - 1) {
+            atomic_store(&state->shared->has_work, false);
+        } else {
+            while (atomic_load(&state->shared->has_work)) {
+                if (atomic_load(&state->shared->stop)) {
+                    return 0;
+                }
+                ggml_lock_lock  (&state->shared->spin);
+                ggml_lock_unlock(&state->shared->spin);
+            }
+        }
+
+        atomic_fetch_sub(&state->shared->n_ready, 1);
+
+        // wait for work
+        while (!atomic_load(&state->shared->has_work)) {
+            if (atomic_load(&state->shared->stop)) {
+                return 0;
+            }
+            ggml_lock_lock  (&state->shared->spin);
+            ggml_lock_unlock(&state->shared->spin);
+        }
+
+        // check if we should stop
+        if (atomic_load(&state->shared->stop)) {
+            break;
+        }
+
+        if (state->node) {
+            if (state->params.ith < state->params.nth) {
+                ggml_compute_forward(&state->params, state->node);
+            }
+
+            state->node = NULL;
+        } else {
+            break;
+        }
+    }
+
+    return 0;
+}
