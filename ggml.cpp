@@ -1217,55 +1217,55 @@ static void ggml_compute_forward(struct ggml_compute_params* params, struct ggml
             } break;
         case GGML_OP_ADD:
             {
-                ggml_compute_forward_add(params, tensor);
+                ggml_compute_forward_add(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_MUL:
             {
-                ggml_compute_forward_mul(params, tensor);
+                ggml_compute_forward_mul(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_MUL_MAT:
             {
-                ggml_compute_forward_mul_mat(params, tensor);
+                ggml_compute_forward_mul_mat(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_SCALE:
             {
-                ggml_compute_forward_scale(params, tensor);
+                ggml_compute_forward_scale(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_CPY:
             {
-                ggml_compute_forward_cpy(params, tensor);
+                ggml_compute_forward_cpy(params, tensor->src0, tensor);
             } break;
         case GGML_OP_PERMUTE:
             {
-                ggml_compute_forward_permute(params, tensor);
+                ggml_compute_forward_permute(params, tensor->src0);
             } break;
         case GGML_OP_RESHAPE:
             {
-                // do nothing
+                ggml_compute_forward_reshape(params, tensor->src0, tensor);
             } break;
         case GGML_OP_NORM:
             {
-                ggml_compute_forward_norm(params, tensor);
+                ggml_compute_forward_norm(params, tensor->src0, tensor);
             } break;
         case GGML_OP_SILU:
             {
-                ggml_compute_forward_silu(params, tensor);
+                ggml_compute_forward_silu(params, tensor->src0, tensor);
             } break;
         case GGML_OP_DIAG_MASK_INF:
             {
-                ggml_compute_forward_diag_mask_inf(params, tensor);
+                ggml_compute_forward_diag_mask_inf(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_SOFT_MAX:
             {
-                ggml_compute_forward_soft_max(params, tensor);
+                ggml_compute_forward_soft_max(params, tensor->src0, tensor);
             } break;
         case GGML_OP_ROPE:
             {
-                ggml_compute_forward_rope(params, tensor);
+                ggml_compute_forward_rope(params, tensor->src0, tensor->src1, tensor);
             } break;
         case GGML_OP_REPEAT:
             {
-                ggml_compute_forward_repeat(params, tensor);
+                ggml_compute_forward_repeat(params, tensor->src0, tensor);
             } break;
     }
 }
