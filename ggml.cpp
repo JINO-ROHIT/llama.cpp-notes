@@ -4,8 +4,21 @@
 #include <arm_neon.h>
 #include <stdatomic.h>
 
-typedef float ggml_float;
+typedef double ggml_float;
+typedef void* thread_ret_t;
+typedef int ggml_lock_t;
 
+#define ggml_lock_init(x)    UNUSED(x)
+#define ggml_lock_destroy(x) UNUSED(x)
+#define ggml_lock_lock(x)    UNUSED(x)
+#define ggml_lock_unlock(x)  UNUSED(x)
+
+#define GGML_LOCK_INITIALIZER 0
+
+typedef pthread_t ggml_thread_t;
+
+#define ggml_thread_create pthread_create
+#define ggml_thread_join   pthread_join
 
 #define QK 32 // quantization block size
 #define GGML_MEM_ALIGN 16
@@ -24,6 +37,57 @@ typedef float ggml_float;
 #define GGML_FP16_TO_FP32(x) (x)
 #define GGML_FP32_TO_FP16(x) (x)
 #define ggml_perf_time_us()       0
+#define ggml_perf_time_ms()       0
+#define ggml_perf_cycles()        0
+#define ggml_perf_cycles_per_ms() 0
+
+int64_t ggml_cycles_per_ms(void) {
+    return CLOCKS_PER_SEC/1000;
+}
+
+static const int GGML_BLCK_SIZE[GGML_TYPE_COUNT] = {
+    QK,
+    QK,
+    1,
+    1,
+    1,
+    1,
+    1,
+};
+
+static const size_t GGML_TYPE_SIZE[GGML_TYPE_COUNT] = {
+    sizeof(float  )   + QK/2,
+    sizeof(float  )*2 + QK/2,
+    sizeof(int8_t ),
+    sizeof(int16_t),
+    sizeof(int32_t),
+    sizeof(ggml_fp16_t),
+    sizeof(float  ),
+};
+
+
+//context management
+
+//manages a memory pool for tensors and other objects, with a linked list of ggml_object entries
+struct ggml_context {
+    size_t mem_size; // size of memory pool
+    void* mem_buffer; // pointer to memory pool
+    bool mem_buffer_owned; // does the context own the memory pool?
+
+    int n_objects; // number of allocated objects in the context
+
+    struct ggml_object* objects_begin; // linked list of allocated objects
+    struct ggml_object* objects_end; 
+
+    struct ggml_scratch scratch; // current scratch buffer
+    struct ggml_scratch scratch_save;
+};
+
+//tracks whether a context is in use
+struct ggml_context_container {
+    bool used;
+    struct ggml_context context;
+};
 
 //precomputed tables
 static ggml_fp16_t table_gelu_f16[1 << 16];
