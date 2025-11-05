@@ -89,14 +89,22 @@ struct ggml_tensor {
     char padding[8];     // padding for memory alignment
 };
 
-struct ggml_cgraph{
+struct ggml_cgraph {
     int n_nodes;
     int n_leafs;
     int n_threads;
 
+    size_t work_size;
+    struct ggml_tensor * work;
+
     struct ggml_tensor * nodes[GGML_MAX_NODES];
     struct ggml_tensor * grads[GGML_MAX_NODES];
     struct ggml_tensor * leafs[GGML_MAX_NODES];
+
+    // performance
+    int     perf_runs;
+    int64_t perf_cycles;
+    int64_t perf_time_us;
 };
 
 //A temporary memory buffer for intermediate computations, reducing memory allocation overhead.
@@ -150,3 +158,4 @@ struct ggml_tensor * ggml_silu(struct ggml_context * ctx,struct ggml_tensor  * a
 //for the computation graph
 void ggml_build_forward_expand(struct ggml_cgraph * cgraph, struct ggml_tensor * tensor);
 struct ggml_cgraph ggml_build_forward (struct ggml_tensor * tensor);
+void ggml_graph_compute(struct ggml_context * ctx, struct ggml_cgraph * cgraph);
