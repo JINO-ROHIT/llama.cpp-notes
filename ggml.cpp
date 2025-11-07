@@ -153,25 +153,352 @@ inline static float ggml_silu_f32(float x) {
     return x/(1.0 + exp(-x));
 }
 
-static const int GGML_BLCK_SIZE[GGML_TYPE_COUNT] = {
-    QK,
-    QK,
-    1,
-    1,
-    1,
-    1,
-    1,
+
+static const size_t CACHE_LINE_SIZE_F32 = CACHE_LINE_SIZE/sizeof(float);
+
+void quantize_row_q4_0(const float * __restrict x, void * __restrict y, int k) {
+
+    const int nb = k / QK;
+
+    float   * __restrict pd = (float *)   (y);
+    uint8_t * __restrict pb = (uint8_t *) (pd + nb);
+
+    uint8_t pp[QK/2];
+
+    for (int i = 0; i < nb; i++) {
+        float amax = 0.0f; // absolute max
+
+        float32x4_t srcv [8];
+        float32x4_t asrcv[8];
+        float32x4_t amaxv[8];
+
+        for (int l = 0; l < 8; l++) srcv[l]  = vld1q_f32(x + i*32 + 4*l);
+        for (int l = 0; l < 8; l++) asrcv[l] = vabsq_f32(srcv[l]);
+
+        for (int l = 0; l < 4; l++) amaxv[2*l] = vmaxq_f32(asrcv[2*l], asrcv[2*l+1]);
+        for (int l = 0; l < 2; l++) amaxv[4*l] = vmaxq_f32(amaxv[4*l], amaxv[4*l+2]);
+        for (int l = 0; l < 1; l++) amaxv[8*l] = vmaxq_f32(amaxv[8*l], amaxv[8*l+4]);
+
+        amax = MAX(
+                MAX(vgetq_lane_f32(amaxv[0], 0), vgetq_lane_f32(amaxv[0], 1)),
+                MAX(vgetq_lane_f32(amaxv[0], 2), vgetq_lane_f32(amaxv[0], 3)));
+
+        const float d = amax / ((1 << 3) - 1);
+        const float id = d ? 1.0/d : 0.0;
+
+        pd[i] = d;
+
+        for (int l = 0; l < 8; l++) {
+            const float32x4_t v  = vmulq_n_f32(srcv[l], id);
+            const float32x4_t vf = vaddq_f32(v, vdupq_n_f32(8.5f));
+            const int32x4_t   vi = vcvtq_s32_f32(vf);
+
+            pp[2*l + 0] = vgetq_lane_s32(vi, 0) | (vgetq_lane_s32(vi, 1) << 4);
+            pp[2*l + 1] = vgetq_lane_s32(vi, 2) | (vgetq_lane_s32(vi, 3) << 4);
+        }
+
+        memcpy(pb + i*16, pp, sizeof(pp));
+    }
+}
+
+void quantize_row_q4_1(const float * __restrict x, void * __restrict y, int k) {
+
+    const int nb = k / QK;
+
+    float   * __restrict pm = (float *)   (y);
+    float   * __restrict pd = (float *)   (pm + nb);
+    uint8_t * __restrict pb = (uint8_t *) (pd + nb);
+
+    uint8_t pp[QK/2];
+
+    for (int i = 0; i < nb; i++) {
+        float min = FLT_MAX;
+        float max = -FLT_MAX;
+
+        for (int l = 0; l < QK; l++) {
+            const float v = x[i*QK + l];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+
+        const float d = (max - min) / ((1 << 4) - 1);
+        const float id = d ? 1.0f/d : 0.0f;
+
+        pm[i] = min;
+        pd[i] = d;
+
+        for (int l = 0; l < QK; l += 2) {
+            const float v0 = (x[i*QK + l + 0] - min)*id;
+            const float v1 = (x[i*QK + l + 1] - min)*id;
+
+            const uint8_t vi0 = round(v0);
+            const uint8_t vi1 = round(v1);
+
+            pp[l/2] = vi0 | (vi1 << 4);
+        }
+
+        memcpy(pb + i*QK/2, pp, sizeof(pp));
+    }
+}
+
+inline static void ggml_vec_dot_q4_0(const int n, float * __restrict s, const void * __restrict x, const void* __restrict y) {
+    const int nb = n / QK;
+
+
+    const float * __restrict pd0 = (const float *) x;
+    const float * __restrict pd1 = (const float *) y;
+
+    const uint8_t * __restrict pb0 = (const uint8_t *) (pd0 + nb);
+    const uint8_t * __restrict pb1 = (const uint8_t *) (pd1 + nb);
+
+    float sumf = 0.0;
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+
+    for (int i = 0; i < nb; i += 2) {
+        const float d0_0 = pd0[i + 0];
+        const float d1_0 = pd1[i + 0];
+        const float d0_1 = pd0[i + 1];
+        const float d1_1 = pd1[i + 1];
+
+        //printf("d0_0: %f, d1_0: %f, d0_1: %f, d1_1: %f\n", d0_0, d1_0, d0_1, d1_1);
+
+        const uint8_t * __restrict p0 = pb0 + i*16;
+        const uint8_t * __restrict p1 = pb1 + i*16;
+
+        const uint8x16_t m4b = vdupq_n_u8(0xf);
+        const int8x16_t  s8b = vdupq_n_s8(0x8);
+
+        const uint8x16_t v0_0 = vld1q_u8(p0);
+        const uint8x16_t v1_0 = vld1q_u8(p1);
+        const uint8x16_t v0_1 = vld1q_u8(p0 + 16);
+        const uint8x16_t v1_1 = vld1q_u8(p1 + 16);
+
+        // 4-bit -> 8-bit
+        const int8x16_t v0_0l = vreinterpretq_s8_u8(vandq_u8(v0_0, m4b));
+        const int8x16_t v1_0l = vreinterpretq_s8_u8(vandq_u8(v1_0, m4b));
+
+        const int8x16_t v0_0h = vreinterpretq_s8_u8(vshrq_n_u8(v0_0, 4));
+        const int8x16_t v1_0h = vreinterpretq_s8_u8(vshrq_n_u8(v1_0, 4));
+
+        const int8x16_t v0_1l = vreinterpretq_s8_u8(vandq_u8(v0_1, m4b));
+        const int8x16_t v1_1l = vreinterpretq_s8_u8(vandq_u8(v1_1, m4b));
+
+        const int8x16_t v0_1h = vreinterpretq_s8_u8(vshrq_n_u8(v0_1, 4));
+        const int8x16_t v1_1h = vreinterpretq_s8_u8(vshrq_n_u8(v1_1, 4));
+
+        // sub 8
+        const int8x16_t v0_0ls = vsubq_s8(v0_0l, s8b);
+        const int8x16_t v1_0ls = vsubq_s8(v1_0l, s8b);
+
+        const int8x16_t v0_0hs = vsubq_s8(v0_0h, s8b);
+        const int8x16_t v1_0hs = vsubq_s8(v1_0h, s8b);
+
+        const int8x16_t v0_1ls = vsubq_s8(v0_1l, s8b);
+        const int8x16_t v1_1ls = vsubq_s8(v1_1l, s8b);
+
+        const int8x16_t v0_1hs = vsubq_s8(v0_1h, s8b);
+        const int8x16_t v1_1hs = vsubq_s8(v1_1h, s8b);
+
+        // dot product into int16x8_t
+        const int16x8_t pl0l = vmull_s8(vget_low_s8 (v0_0ls), vget_low_s8 (v1_0ls));
+        const int16x8_t pl0h = vmull_s8(vget_high_s8(v0_0ls), vget_high_s8(v1_0ls));
+
+        const int16x8_t ph0l = vmull_s8(vget_low_s8 (v0_0hs), vget_low_s8 (v1_0hs));
+        const int16x8_t ph0h = vmull_s8(vget_high_s8(v0_0hs), vget_high_s8(v1_0hs));
+
+        const int16x8_t pl1l = vmull_s8(vget_low_s8 (v0_1ls), vget_low_s8 (v1_1ls));
+        const int16x8_t pl1h = vmull_s8(vget_high_s8(v0_1ls), vget_high_s8(v1_1ls));
+
+        const int16x8_t ph1l = vmull_s8(vget_low_s8 (v0_1hs), vget_low_s8 (v1_1hs));
+        const int16x8_t ph1h = vmull_s8(vget_high_s8(v0_1hs), vget_high_s8(v1_1hs));
+
+        const int16x8_t pl_0 = vaddq_s16(pl0l, pl0h);
+        const int16x8_t ph_0 = vaddq_s16(ph0l, ph0h);
+
+        const int16x8_t pl_1 = vaddq_s16(pl1l, pl1h);
+        const int16x8_t ph_1 = vaddq_s16(ph1l, ph1h);
+
+        const int16x8_t p_0 = vaddq_s16(pl_0, ph_0);
+        const int16x8_t p_1 = vaddq_s16(pl_1, ph_1);
+
+        // scalar
+        sum0 += d0_0*d1_0*vaddvq_s16(p_0);
+        sum1 += d0_1*d1_1*vaddvq_s16(p_1);
+
+    sumf = sum0 + sum1;
+
+    *s = sumf;
+}
 };
 
-static const size_t GGML_TYPE_SIZE[GGML_TYPE_COUNT] = {
-    sizeof(float  )   + QK/2,
-    sizeof(float  )*2 + QK/2,
-    sizeof(int8_t ),
-    sizeof(int16_t),
-    sizeof(int32_t),
-    sizeof(ggml_fp16_t),
-    sizeof(float  ),
-};
+inline static void ggml_vec_dot_q4_1(const int n, float * __restrict s, const void * __restrict x, const void * __restrict y) {
+    const int nb = n / QK;
+
+    const float * __restrict pm0 = (const float *) x;
+    const float * __restrict pm1 = (const float *) y;
+
+    const float * __restrict pd0 = (const float *) (pm0 + nb);
+    const float * __restrict pd1 = (const float *) (pm1 + nb);
+
+    const uint8_t * __restrict pb0 = (const uint8_t *) (pd0 + nb);
+    const uint8_t * __restrict pb1 = (const uint8_t *) (pd1 + nb);
+
+    float sumf = 0.0;
+
+#if 1
+    // scalar
+    for (int i = 0; i < nb; i++) {
+        const float m0 = pm0[i];
+        const float m1 = pm1[i];
+
+        const float d0 = pd0[i];
+        const float d1 = pd1[i];
+
+        const uint8_t * __restrict p0 = pb0 + i*QK/2;
+        const uint8_t * __restrict p1 = pb1 + i*QK/2;
+
+        for (int j = 0; j < QK/2; j++) {
+            const uint8_t v0 = p0[j];
+            const uint8_t v1 = p1[j];
+
+            const float f0 = d0*(v0 & 0xf) + m0;
+            const float f1 = d0*(v0 >> 4)  + m0;
+
+            const float f2 = d1*(v1 & 0xf) + m1;
+            const float f3 = d1*(v1 >> 4)  + m1;
+
+            sumf += f0*f2 + f1*f3;
+        }
+    }
+#endif
+
+    *s = sumf;
+}
+
+inline static void ggml_vec_mad_q4_0(const int n, float * __restrict y, void * __restrict x, const float v) {
+
+    const int nb = n / QK;
+
+    const float   * __restrict pd = (const float *)   (x);
+    const uint8_t * __restrict pb = (const uint8_t *) (pd + nb);
+
+#if __ARM_NEON
+#if QK == 32
+    for (int i = 0; i < nb; ++i) {
+        const float d0 = pd[i]*v;
+
+        const uint8_t * __restrict pp = pb + i*16;
+
+        const uint8x8_t m4b = vdup_n_u8(0xf);
+        const int8x8_t  s8b = vdup_n_s8(0x8);
+
+        const float32x4_t vd = vdupq_n_f32(d0);
+
+        for (int j = 0; j < 2; j++) {
+            const uint8x8_t vx = vld1_u8(pp + j*8);
+
+            const int8x8_t vxl = vreinterpret_s8_u8(vand_u8(vx, m4b));
+            const int8x8_t vxh = vreinterpret_s8_u8(vshr_n_u8(vx, 4));
+
+            // sub 8
+            const int8x8_t vxls = vsub_s8(vxl, s8b);
+            const int8x8_t vxhs = vsub_s8(vxh, s8b);
+
+            //const int8x8_t vxlt = vzip_s8(vxls, vxhs)[0];
+            //const int8x8_t vxht = vzip_s8(vxls, vxhs)[1];
+            const int8x8_t vxlt = vzip1_s8(vxls, vxhs);
+            const int8x8_t vxht = vzip2_s8(vxls, vxhs);
+
+            const int8x16_t vxq = vcombine_s8(vxlt, vxht);
+
+            // convert to 2x int16x8_t
+            const int16x8_t vxq0 = vmovl_s8(vget_low_s8 (vxq));
+            const int16x8_t vxq1 = vmovl_s8(vget_high_s8(vxq));
+
+            // convert to 4x float32x4_t
+            const float32x4_t vx0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16 (vxq0)));
+            const float32x4_t vx1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vxq0)));
+            const float32x4_t vx2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16 (vxq1)));
+            const float32x4_t vx3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(vxq1)));
+
+            const float32x4_t vy0 = vld1q_f32(y + i*32 + j*16 + 0);
+            const float32x4_t vy1 = vld1q_f32(y + i*32 + j*16 + 4);
+            const float32x4_t vy2 = vld1q_f32(y + i*32 + j*16 + 8);
+            const float32x4_t vy3 = vld1q_f32(y + i*32 + j*16 + 12);
+
+            const float32x4_t vr0 = vfmaq_f32(vy0, vx0, vd);
+            const float32x4_t vr1 = vfmaq_f32(vy1, vx1, vd);
+            const float32x4_t vr2 = vfmaq_f32(vy2, vx2, vd);
+            const float32x4_t vr3 = vfmaq_f32(vy3, vx3, vd);
+
+            vst1q_f32(y + i*32 + j*16 + 0,  vr0);
+            vst1q_f32(y + i*32 + j*16 + 4,  vr1);
+            vst1q_f32(y + i*32 + j*16 + 8,  vr2);
+            vst1q_f32(y + i*32 + j*16 + 12, vr3);
+        }
+    }
+#endif
+#else
+    // scalar
+    for (int i = 0; i < nb; i++) {
+        const float d = pd[i];
+
+        const uint8_t * restrict pp = pb + i*QK/2;
+
+        for (int l = 0; l < QK; l += 2) {
+            const uint8_t vi = pp[l/2];
+
+            const int8_t vi0 = vi & 0xf;
+            const int8_t vi1 = vi >> 4;
+
+            const float v0 = (vi0 - 8)*d;
+            const float v1 = (vi1 - 8)*d;
+
+            y[i*QK + l + 0] += v0*v;
+            y[i*QK + l + 1] += v1*v;
+
+            assert(!isnan(y[i*QK + l + 0]));
+            assert(!isnan(y[i*QK + l + 1]));
+            assert(!isinf(y[i*QK + l + 0]));
+            assert(!isinf(y[i*QK + l + 1]));
+        }
+    }
+#endif
+}
+
+inline static void ggml_vec_mad_q4_1(const int n, float * __restrict y, void * __restrict x, const float v) {
+
+
+    const int nb = n / QK;
+
+    const float   * __restrict pm = (const float *)   (x);
+    const float   * __restrict pd = (const float *)   (pm + nb);
+    const uint8_t * __restrict pb = (const uint8_t *) (pd + nb);
+
+    for (int i = 0; i < nb; i++) {
+        const float m = pm[i];
+        const float d = pd[i];
+
+        const uint8_t * __restrict pp = pb + i*QK/2;
+
+        for (int l = 0; l < QK; l += 2) {
+            const uint8_t vi = pp[l/2];
+
+            const uint8_t vi0 = vi & 0xf;
+            const uint8_t vi1 = vi >> 4;
+
+            const float v0 = d*vi0 + m;
+            const float v1 = d*vi1 + m;
+
+            y[i*QK + l + 0] += v0*v;
+            y[i*QK + l + 1] += v1*v;
+
+            //printf("mad: v0 %f v1 %f, i = %d, l = %d, d = %f, vi = %d, vi0 = %d, vi1 = %d\n", v0, v1, i, l, d, vi, vi0, vi1);
+        }
+    }
+}
+
 
 float ggml_fp16_to_fp32(ggml_fp16_t x) {
     return GGML_FP16_TO_FP32(x);
