@@ -25,4 +25,10 @@ python3 convert-pth-to-ggml.py <model_dir>
 ./llama-quantize models/7B/ggml-model-f16.bin models/7B/ggml-model-quant.bin dtype
 ```
 
+3. Run the main.cpp
+
+```cpp
+./main
+```
+
 
